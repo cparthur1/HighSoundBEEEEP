@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Medidor de Nível Sonoro</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        /* Custom styles for better visual feedback */
+        .limit-exceeded-bg {
+            animation: pulse-red 1s infinite;
+        }
+        @keyframes pulse-red {
+            0% { background-color: #fecaca; } /* red-200 */
+            50% { background-color: #f87171; } /* red-400 */
+            100% { background-color: #fecaca; } /* red-200 */
+        }
+    </style>
+</head>
+<body class="bg-gray-100 flex items-center justify-center min-h-screen p-4">
+
+    <div class="w-full max-w-md">
+        <div class="bg-white shadow-xl rounded-xl p-6 md:p-8">
+            <h1 class="text-2xl sm:text-3xl font-bold mb-6 text-center text-gray-800">Medidor de Nível Sonoro</h1>
+
+            <div class="mb-6">
+                <label for="threshold" class="block text-sm font-medium text-gray-700 mb-1">
+                    Limite Máximo de Ruído (0-100):
+                </label>
+                <input type="number" id="threshold" value="70" min="0" max="100" class="mt-1 block w-full rounded-lg border-gray-300 shadow-sm focus:border-blue-500 focus:ring focus:ring-blue-500 focus:ring-opacity-50 p-3 text-lg">
+            </div>
+
+            <div class="mb-6">
+                <p class="text-sm font-medium text-gray-700 mb-1">Nível Sonoro Atual:</p>
+                <div id="levelDisplayContainer" class="rounded-lg transition-colors duration-300">
+                    <div id="levelDisplay" class="text-5xl font-bold text-center py-4 text-blue-600">
+                        0
+                    </div>
+                </div>
+                <div class="w-full bg-gray-200 rounded-full h-4 mt-2 overflow-hidden shadow-inner">
+                    <div id="levelBar" class="bg-blue-500 h-4 rounded-full transition-all duration-100 ease-linear" style="width: 0%;"></div>
+                </div>
+            </div>
+
+            <div class="mb-6">
+                <p class="text-sm font-medium text-gray-700 mb-1">Nível Médio de Ruído:</p>
+                <div id="averageLevelDisplay" class="text-3xl font-bold text-center py-2 text-gray-700 rounded-lg bg-gray-50">
+                    0
+                </div>
+            </div>
+
+            <button id="toggleButton" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-4 rounded-lg transition duration-150 ease-in-out text-lg shadow-md hover:shadow-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50">
+                Iniciar Monitoramento
+            </button>
+
+            <p id="statusMessage" class="mt-4 text-sm text-center text-gray-600 min-h-[1.25em]">Pronto para iniciar.</p>
+            <p id="errorMessage" class="mt-2 text-sm text-center text-red-600 min-h-[1.25em]"></p>
+        </div>
+        <footer class="text-center mt-6 text-xs text-gray-500">
+            <p>Use fones de ouvido para melhor experiência com o bipe de alerta.</p>
+            <p>A precisão depende do microfone e do ambiente.</p>
+        </footer>
+    </div>
+
+    <script>
+        // Elementos da DOM
+        const thresholdInput = document.getElementById('threshold');
+        const levelDisplay = document.getElementById('levelDisplay');
+        const levelDisplayContainer = document.getElementById('levelDisplayContainer');
+        const levelBar = document.getElementById('levelBar');
+        const averageLevelDisplay = document.getElementById('averageLevelDisplay'); // Novo elemento
+        const toggleButton = document.getElementById('toggleButton');
+        const statusMessage = document.getElementById('statusMessage');
+        const errorMessage = document.getElementById('errorMessage');
+
+        // Variáveis de áudio e estado
+        let mic, analyserNode;
+        let animationFrameId;
+        let isMonitoring = false;
+        let synth; // Para o bipe
+        
+        // Configurações do bipe
+        let lastBeepTime = 0;
+        const BEEP_COOLDOWN_MS = 2000; 
+        let limitExceededStartTime = null; 
+        const TIME_ABOVE_LIMIT_BEFORE_BEEP_MS = 3000; 
+
+        // Configurações do analisador
+        const MIN_DB_LEVEL = -122; 
+        const MAX_DB_LEVEL = -70;  
+
+        // Variáveis para cálculo da média
+        let totalLevelSum = 0;
+        let levelReadingsCount = 0;
+
+
+        // Inicializa o sintetizador para o bipe
+        function setupSynth() {
+            if (!synth) {
+                synth = new Tone.Synth({
+                    oscillator: { type: 'square' }, 
+                    envelope: { attack: 0.005, decay: 0.1, sustain: 0.3, release: 0.2 } // Ajustado para 0.5s
+                }).toDestination();
+            }
+        }
+
+        // Função para iniciar o monitoramento
+        async function startMonitoring() {
+            errorMessage.textContent = ''; 
+            if (isMonitoring) return;
+
+            try {
+                await Tone.start();
+                setupSynth();
+
+                mic = new Tone.UserMedia();
+                await mic.open(); 
+
+                analyserNode = new Tone.Analyser('fft', 256);
+                analyserNode.smoothing = 0.6; 
+
+                mic.connect(analyserNode);
+
+                isMonitoring = true;
+                toggleButton.textContent = 'Parar Monitoramento';
+                toggleButton.classList.remove('bg-blue-600', 'hover:bg-blue-700');
+                toggleButton.classList.add('bg-red-600', 'hover:bg-red-700');
+                statusMessage.textContent = 'Monitorando...';
+                limitExceededStartTime = null; 
+                
+                // Reseta as variáveis da média
+                totalLevelSum = 0;
+                levelReadingsCount = 0;
+                averageLevelDisplay.textContent = '0';
+                
+                processAudio(); 
+
+            } catch (err) {
+                console.error("Erro ao iniciar monitoramento:", err);
+                errorMessage.textContent = `Erro: ${err.message}. Verifique as permissões do microfone.`;
+                isMonitoring = false;
+                 statusMessage.textContent = 'Falha ao iniciar.';
+            }
+        }
+
+        // Função para parar o monitoramento
+        function stopMonitoring() {
+            if (!isMonitoring) return;
+
+            if (mic) {
+                mic.close();
+            }
+            if (analyserNode) {
+                analyserNode.dispose();
+            }
+            if (animationFrameId) {
+                cancelAnimationFrame(animationFrameId);
+            }
+
+            isMonitoring = false;
+            toggleButton.textContent = 'Iniciar Monitoramento';
+            toggleButton.classList.remove('bg-red-600', 'hover:bg-red-700');
+            toggleButton.classList.add('bg-blue-600', 'hover:bg-blue-700');
+            statusMessage.textContent = 'Monitoramento parado.';
+            levelDisplay.textContent = '0'; 
+            levelBar.style.width = '0%';
+            // Mantém a última média calculada visível ao parar, ou reseta:
+            // averageLevelDisplay.textContent = '0'; // Para resetar ao parar
+            levelDisplay.classList.remove('text-red-500');
+            levelDisplay.classList.add('text-blue-600');
+            levelDisplayContainer.classList.remove('limit-exceeded-bg', 'bg-red-100');
+            limitExceededStartTime = null; 
+        }
+
+        // Função para processar o áudio e atualizar a UI
+        function processAudio() {
+            if (!isMonitoring || !analyserNode) return;
+
+            const fftValues = analyserNode.getValue(); 
+            
+            if (fftValues instanceof Float32Array && fftValues.length > 0) {
+                let sumDb = 0;
+                let count = 0;
+                for (const val of fftValues) {
+                    if (isFinite(val)) {
+                        sumDb += val;
+                        count++;
+                    }
+                }
+                
+                const averageDb = count > 0 ? sumDb / count : MIN_DB_LEVEL;
+                const clampedDb = Math.max(MIN_DB_LEVEL, Math.min(MAX_DB_LEVEL, averageDb));
+                
+                let currentLevel = ((clampedDb - MIN_DB_LEVEL) / (MAX_DB_LEVEL - MIN_DB_LEVEL)) * 100;
+                currentLevel = Math.max(0, Math.min(100, Math.round(currentLevel)));
+
+                levelDisplay.textContent = currentLevel;
+                levelBar.style.width = `${currentLevel}%`;
+
+                // Atualiza cálculo da média
+                totalLevelSum += currentLevel;
+                levelReadingsCount++;
+                if (levelReadingsCount > 0) {
+                    const runningAverage = Math.round(totalLevelSum / levelReadingsCount);
+                    averageLevelDisplay.textContent = runningAverage;
+                }
+
+                const thresholdValue = parseInt(thresholdInput.value, 10);
+                if (currentLevel > thresholdValue) {
+                    if (!limitExceededStartTime) {
+                        limitExceededStartTime = Date.now();
+                    }
+
+                    levelDisplay.classList.remove('text-blue-600');
+                    levelDisplay.classList.add('text-red-500');
+                    levelBar.classList.remove('bg-blue-500');
+                    levelBar.classList.add('bg-red-500');
+                    levelDisplayContainer.classList.add('bg-red-100');
+
+                    if ((Date.now() - limitExceededStartTime) >= TIME_ABOVE_LIMIT_BEFORE_BEEP_MS) {
+                        const now = Date.now();
+                        if (now - lastBeepTime > BEEP_COOLDOWN_MS) { 
+                            playBeep();
+                            lastBeepTime = now;
+                            statusMessage.textContent = 'Limite excedido! BIPE!';
+                            levelDisplayContainer.classList.add('limit-exceeded-bg'); 
+
+                            setTimeout(() => {
+                                if (isMonitoring) { 
+                                    statusMessage.textContent = 'Monitorando... (acima do limite)';
+                                }
+                                levelDisplayContainer.classList.remove('limit-exceeded-bg');
+                            }, 1000); 
+                        }
+                    } else {
+                         if (isMonitoring) statusMessage.textContent = 'Monitorando... (acima do limite)';
+                    }
+
+                } else {
+                    limitExceededStartTime = null; 
+
+                    levelDisplay.classList.remove('text-red-500');
+                    levelDisplay.classList.add('text-blue-600');
+                    levelBar.classList.remove('bg-red-500');
+                    levelBar.classList.add('bg-blue-500');
+                    levelDisplayContainer.classList.remove('limit-exceeded-bg', 'bg-red-100');
+                    if (isMonitoring) statusMessage.textContent = 'Monitorando...';
+                }
+            }
+            
+            animationFrameId = requestAnimationFrame(processAudio);
+        }
+
+        // Função para tocar o bipe
+        function playBeep() {
+            if (synth && Tone.context.state === 'running') {
+                try {
+                    // Duração do bipe ajustada para 0.5 segundos (500ms)
+                    // O envelope do synth foi ajustado para refletir melhor essa duração
+                    synth.triggerAttackRelease("C6", 0.5, Tone.now()); 
+                } catch (e) {
+                    console.error("Erro ao tocar bipe:", e);
+                }
+            }
+        }
+
+        // Event listener para o botão de iniciar/parar
+        toggleButton.addEventListener('click', () => {
+            if (isMonitoring) {
+                stopMonitoring();
+            } else {
+                startMonitoring();
+            }
+        });
+
+        // Ajusta o limite se o usuário digitar um valor fora do range enquanto não monitora
+        thresholdInput.addEventListener('change', () => {
+            let value = parseInt(thresholdInput.value, 10);
+            if (isNaN(value) || value < 0) thresholdInput.value = 0;
+            if (value > 100) thresholdInput.value = 100;
+        });
+
+    </script>
+</body>
+</html>
